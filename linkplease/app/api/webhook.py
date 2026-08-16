@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 from typing import Annotated
 
@@ -27,6 +27,12 @@ def _sign(body: bytes) -> str:
 @router.post("/webhook")
 async def webhook(
     request: Request,
+    # Purely so Swagger/OpenAPI renders a raw-JSON textbox in /docs.
+    # `bytes` type means FastAPI does NOT parse/validate this as JSON —
+    # it's read as-is, so it doesn't run ahead of the signature check
+    # below. The actual bytes used for verification still come from
+    # request.body() a few lines down (same underlying bytes either way).
+    _raw_body_for_docs: Annotated[bytes, Body(media_type="application/json")] = b"{}",
     signature: Annotated[
         str | None,
         Header(alias="X-PseudoGram-Signature")
