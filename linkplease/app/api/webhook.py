@@ -27,10 +27,7 @@ def _sign(body: bytes) -> str:
 @router.post("/webhook")
 async def webhook(
     request: Request,
-    body: Annotated[
-        bytes,
-        Body(media_type="application/json")
-    ],
+    event: WebhookEvent,
     signature: Annotated[
         str | None,
         Header(alias="X-PseudoGram-Signature")
@@ -43,6 +40,9 @@ async def webhook(
             detail="Missing webhook signature",
         )
 
+    # Get the raw request body for HMAC verification
+    body = await request.body()
+
     expected_header = _sign(body)
 
     if not hmac.compare_digest(
@@ -54,21 +54,13 @@ async def webhook(
             detail="Invalid webhook signature",
         )
 
-    try:
-        event = WebhookEvent.model_validate_json(body)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid webhook payload: {exc}",
-        )
-
+    # Pydantic has already validated the JSON
     result = process_webhook(event, db)
 
     return {
         "status": "ok",
         "result": result,
     }
-
 
 @router.post("/webhook/sign")
 async def generate_signature(request: Request):
