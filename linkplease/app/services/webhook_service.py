@@ -1,11 +1,12 @@
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
-
+from app.models.blocked_duplicate import BlockedDuplicate
 from app.models.comment import Comment
 from app.models.dm_job import DMJob
 from app.models.event import Event
 from app.models.rule import Rule
+
 
 
 def process_webhook(event, db: Session) -> str:
@@ -27,7 +28,9 @@ def process_webhook(event, db: Session) -> str:
     result = db.execute(event_insert)
 
     if result.rowcount == 0:
-        return "duplicate"
+      return "duplicate"
+
+
 
     comment_id = event.data.comment_id
 
@@ -160,11 +163,19 @@ def process_webhook(event, db: Session) -> str:
         job_result = db.execute(job_insert)
 
         if job_result.rowcount == 0:
-            print(
-                f"Duplicate blocked: "
-                f"user={user.user_id}, rule={rule.id}"
-            )
 
+         duplicate_insert = insert(BlockedDuplicate).values(
+        user_id=user.user_id,
+        rule_id=rule.id,
+        comment_id=comment_id,
+    )
+
+         db.execute(duplicate_insert)
+
+         print(
+        f"Duplicate blocked: "
+        f"user={user.user_id}, rule={rule.id}"
+    )
     # ---------------------------------------------------------
     # 9. Commit everything atomically
     # ---------------------------------------------------------
