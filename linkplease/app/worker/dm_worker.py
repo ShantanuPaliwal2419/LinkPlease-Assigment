@@ -7,7 +7,7 @@ from app.db import SessionLocal
 from app.models.dm_job import DMJob
 from app.services.dm_service import send_dm
 
-
+MAX_ATTEMPTS = 5
 def get_next_job(db):
     return db.scalar(
         select(DMJob)
@@ -80,55 +80,77 @@ def process_job(db, job: DMJob):
     # ---------------------------------------------------------
 
     if response.status_code == 429:
-        retry_after = response.headers.get(
-            "Retry-After",
-            "10",
-        )
-
-        try:
-            retry_seconds = int(retry_after)
-        except ValueError:
-            retry_seconds = 10
-
-        job.status = "queued"
-        job.next_attempt_at = (
-            datetime.now(timezone.utc)
-            + timedelta(seconds=retry_seconds)
-        )
-
+      if job.attempts >= MAX_ATTEMPTS:
+        job.status = "failed"
         db.commit()
 
         print(
-            f"Job {job.id} rate limited. "
-            f"Retrying in {retry_seconds}s"
+            f"Job {job.id} exhausted retries "
+            f"after {job.attempts} attempts"
         )
 
         return
+
+    retry_after = response.headers.get(
+        "Retry-After",
+        "10",
+    )
+
+    try:
+        retry_seconds = int(retry_after)
+    except ValueError:
+        retry_seconds = 10
+
+    job.status = "queued"
+    job.next_attempt_at = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=retry_seconds)
+    )
+
+    db.commit()
+
+    print(
+        f"Job {job.id} rate limited. "
+        f"Retrying in {retry_seconds}s"
+    )
+
+    return
 
     # ---------------------------------------------------------
     # 500 = temporary failure
     # ---------------------------------------------------------
 
     if response.status_code >= 500:
-        retry_seconds = min(
-            2 ** job.attempts,
-            60,
-        )
-
-        job.status = "queued"
-        job.next_attempt_at = (
-            datetime.now(timezone.utc)
-            + timedelta(seconds=retry_seconds)
-        )
-
+      if job.attempts >= MAX_ATTEMPTS:
+        job.status = "failed"
         db.commit()
 
         print(
-            f"Job {job.id} failed with {response.status_code}. "
-            f"Retrying in {retry_seconds}s"
+            f"Job {job.id} exhausted retries "
+            f"after {job.attempts} attempts"
         )
 
         return
+
+    retry_seconds = min(
+        2 ** job.attempts,
+        60,
+    )
+
+    job.status = "queued"
+    job.next_attempt_at = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=retry_seconds)
+    )
+
+    db.commit()
+
+    print(
+        f"Job {job.id} failed with {response.status_code}. "
+        f"Retrying in {retry_seconds}s"
+    )
+
+    return
 
     # ---------------------------------------------------------
     # Anything unexpected
