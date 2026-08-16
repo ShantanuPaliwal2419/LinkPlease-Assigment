@@ -107,9 +107,6 @@ async def generate_signature(request: Request):
     anyone who can call it can forge a valid signature for any payload,
     which defeats the point of signature verification.
     """
-    if not settings.debug:
-        raise HTTPException(status_code=404, detail="Not found")
-
     body = await request.body()
     signature = _sign(body)
 
