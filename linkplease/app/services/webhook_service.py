@@ -9,8 +9,9 @@ from app.models.rule import Rule
 
 
 def process_webhook(event, db: Session) -> str:
+
     # ---------------------------------------------------------
-    # 1. Deduplicate the webhook event
+    # 1. Deduplicate webhook event
     # ---------------------------------------------------------
 
     event_insert = insert(Event).values(
@@ -28,8 +29,38 @@ def process_webhook(event, db: Session) -> str:
     if result.rowcount == 0:
         return "duplicate"
 
+    comment_id = event.data.comment_id
+
     # ---------------------------------------------------------
-    # 2. Part A only handles comment.created
+    # 2. Handle comment.deleted
+    # ---------------------------------------------------------
+
+    if event.event_type == "comment.deleted":
+
+        delete_insert = insert(Comment).values(
+            comment_id=comment_id,
+            state="deleted",
+        )
+
+        delete_insert = delete_insert.on_conflict_do_update(
+            index_elements=[Comment.comment_id],
+            set_={
+                "state": "deleted",
+            },
+        )
+
+        db.execute(delete_insert)
+
+        db.commit()
+
+        print(
+            f"Comment {comment_id} marked as deleted."
+        )
+
+        return "deleted"
+
+    # ---------------------------------------------------------
+    # 3. Ignore events other than comment.created
     # ---------------------------------------------------------
 
     if event.event_type != "comment.created":
@@ -42,10 +73,12 @@ def process_webhook(event, db: Session) -> str:
         db.commit()
         return "ignored"
 
-    comment_id = event.data.comment_id
-
     # ---------------------------------------------------------
-    # 3. Store the comment
+    # 4. Create comment if it doesn't exist.
+    #
+    # IMPORTANT:
+    # If comment.deleted arrived first, the row already exists
+    # with state='deleted', so this INSERT does nothing.
     # ---------------------------------------------------------
 
     comment_insert = insert(Comment).values(
@@ -63,7 +96,35 @@ def process_webhook(event, db: Session) -> str:
     db.execute(comment_insert)
 
     # ---------------------------------------------------------
-    # 4. Find matching rules
+    # 5. Read the actual state from DB
+    # ---------------------------------------------------------
+
+    comment = db.scalar(
+        select(Comment).where(
+            Comment.comment_id == comment_id
+        )
+    )
+
+    # ---------------------------------------------------------
+    # 6. Tombstone check
+    # ---------------------------------------------------------
+
+    if comment is None:
+        db.commit()
+        return "ignored"
+
+    if comment.state == "deleted":
+        db.commit()
+
+        print(
+            f"Comment {comment_id} was already deleted. "
+            f"Skipping DM."
+        )
+
+        return "deleted"
+
+    # ---------------------------------------------------------
+    # 7. Find matching rules
     # ---------------------------------------------------------
 
     rules = db.scalars(select(Rule)).all()
@@ -76,7 +137,7 @@ def process_webhook(event, db: Session) -> str:
             continue
 
         # -----------------------------------------------------
-        # 5. Create DM job
+        # 8. Create DM job.
         #
         # UNIQUE(user_id, rule_id) prevents duplicate DMs.
         # -----------------------------------------------------
@@ -105,7 +166,7 @@ def process_webhook(event, db: Session) -> str:
             )
 
     # ---------------------------------------------------------
-    # 6. Commit everything atomically
+    # 9. Commit everything atomically
     # ---------------------------------------------------------
 
     db.commit()

@@ -33,3 +33,22 @@ def send_dm(
     print("PseudoGram body:", response.text)
 
     return response
+
+
+def get_dm_status(dm_id: str):
+    url = f"{settings.pseudogram_base_url}/v1/dm/{dm_id}"
+
+    headers = {
+        "X-API-Key": settings.pseudogram_api_key,
+    }
+
+    response = httpx.get(
+        url,
+        headers=headers,
+        timeout=10,
+    )
+
+    print("Reconciliation status:", response.status_code)
+    print("Reconciliation body:", response.text)
+
+    return response
