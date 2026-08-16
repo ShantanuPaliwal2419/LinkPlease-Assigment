@@ -178,21 +178,34 @@ def reconcile_job(db, job: DMJob):
     response = get_dm_status(job.dm_id)
 
     # ---------------------------------------------------------
-    # 404 = DM not found yet
+    # 404 = DM not found
     # ---------------------------------------------------------
 
     if response.status_code == 404:
-      job.status = "failed"
+        if job.attempts >= MAX_ATTEMPTS:
+            job.status = "failed"
+            db.commit()
 
-    db.commit()
+            print(
+                f"Job {job.id} failed permanently. "
+                f"DM {job.dm_id} not found."
+            )
+            return
 
-    print(
-        f"Job {job.id} reconciliation failed: "
-        f"DM {job.dm_id} not found."
-    )
+        job.status = "queued"
+        job.next_attempt_at = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=2 ** job.attempts)
+        )
 
-    
-    return
+        db.commit()
+
+        print(
+            f"Job {job.id}: DM {job.dm_id} not found. "
+            f"Retrying."
+        )
+
+        return
 
     # ---------------------------------------------------------
     # Unexpected HTTP response
@@ -273,6 +286,14 @@ def reconcile_job(db, job: DMJob):
 
         return
 
+    # ---------------------------------------------------------
+    # Unknown status
+    # ---------------------------------------------------------
+
+    print(
+        f"Job {job.id}: unknown DM status "
+        f"{dm_status}"
+    )
 
 def run_worker():
     print("DM worker started.")

@@ -9,7 +9,7 @@ import httpx
 from app.config import settings
 
 
-WEBHOOK_URL = "http://127.0.0.1:8000/webhook"
+WEBHOOK_URL = "https://linkplease-assigment.onrender.com/webhook"
 
 TOTAL_EVENTS = 500
 DURATION_SECONDS = 10
