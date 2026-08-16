@@ -271,14 +271,6 @@ def reconcile_job(db, job: DMJob):
 
         return
 
-    # ---------------------------------------------------------
-    # Unknown PseudoGram status
-    # ---------------------------------------------------------
-
-    print(
-        f"Job {job.id}: unknown DM status={dm_status}"
-    )
-
 def run_worker():
     print("DM worker started.")
 
