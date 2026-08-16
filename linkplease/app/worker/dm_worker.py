@@ -192,8 +192,19 @@ def process_job(db, job: DMJob):
     # ---------------------------------------------------------
 
     if response.status_code >= 500:
-        _schedule_retry_or_fail(db, job, f"HTTP {response.status_code}")
-        return
+     logger.error(
+        "Job %s got HTTP %s. body=%s",
+        job.id,
+        response.status_code,
+        response.text,
+    )
+
+     _schedule_retry_or_fail(
+        db,
+        job,
+        f"HTTP {response.status_code}",
+    )
+     return
 
     # ---------------------------------------------------------
     # Unexpected response
