@@ -27,14 +27,16 @@ def _sign(body: bytes) -> str:
 @router.post("/webhook")
 async def webhook(
     request: Request,
+    body: Annotated[
+        bytes,
+        Body(media_type="application/json")
+    ],
     signature: Annotated[
         str | None,
         Header(alias="X-PseudoGram-Signature")
     ] = None,
     db: Session = Depends(get_db),
 ):
-    body = await request.body()
-
     if not signature:
         raise HTTPException(
             status_code=401,
@@ -43,7 +45,10 @@ async def webhook(
 
     expected_header = _sign(body)
 
-    if not hmac.compare_digest(signature, expected_header):
+    if not hmac.compare_digest(
+        signature,
+        expected_header,
+    ):
         raise HTTPException(
             status_code=401,
             detail="Invalid webhook signature",
