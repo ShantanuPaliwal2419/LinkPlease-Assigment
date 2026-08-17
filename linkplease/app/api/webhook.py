@@ -41,6 +41,7 @@ async def webhook(
     ] = None,
     db: Session = Depends(get_db),
 ):
+    print(f"DEBUG - Headers: {dict(request.headers)}")
     if not signature:
         raise HTTPException(
             status_code=401,
