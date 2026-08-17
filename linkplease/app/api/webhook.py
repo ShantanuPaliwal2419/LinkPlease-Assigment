@@ -9,9 +9,16 @@ from app.config import settings
 from app.db import get_db
 from app.schemas import WebhookEvent
 from app.services.webhook_service import process_webhook
+import time
+PROCESS_START = time.time()
 
 router = APIRouter(tags=["webhook"])
-
+@router.get("/debug/key-check")
+def key_check():
+    return {
+        "key_full": settings.pseudogram_api_key,
+        "process_started_at": PROCESS_START,
+    }
 
 def _sign(body: bytes) -> str:
     """Shared signing logic so the real endpoint and the test-signer
