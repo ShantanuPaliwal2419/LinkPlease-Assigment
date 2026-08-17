@@ -39,10 +39,10 @@ async def webhook(
             status_code=401,
             detail="Missing webhook signature",
         )
-
+    print(f"DEBUG - API Key being used: {settings.pseudogram_api_key[:5]}...")
     # Get the raw request body for HMAC verification
     body = await request.body()
-
+    print(f"DEBUG - API Key being used: {settings.pseudogram_api_key[:5]}...")
     expected_header = _sign(body)
     print(f"DEBUG - Received Header Signature: {signature}")
     print(f"DEBUG - Computed Expected Signature: {expected_header}")
