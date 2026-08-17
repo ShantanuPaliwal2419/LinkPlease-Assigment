@@ -44,6 +44,9 @@ async def webhook(
     body = await request.body()
 
     expected_header = _sign(body)
+    print(f"DEBUG - Received Header Signature: {signature}")
+    print(f"DEBUG - Computed Expected Signature: {expected_header}")
+    print(f"DEBUG - Raw Body Sample: {body[:100]}") 
 
     if not hmac.compare_digest(
         signature,
