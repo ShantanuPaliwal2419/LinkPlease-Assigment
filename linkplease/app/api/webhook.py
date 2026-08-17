@@ -63,20 +63,10 @@ async def webhook(
     }
 
 @router.post("/webhook/sign")
-async def generate_signature(request: Request):
-    """
-    Dev/testing helper only — NOT part of the real PseudoGram contract.
-
-    Takes whatever raw JSON body you send it and returns the matching
-    X-PseudoGram-Signature value, computed with the exact same secret and
-    logic as the real /webhook route. Point Postman/curl at this first to
-    get a valid signature for a payload, then send that same payload + the
-    returned signature to /webhook.
-
-    In production this endpoint should not exist / should be disabled --
-    anyone who can call it can forge a valid signature for any payload,
-    which defeats the point of signature verification.
-    """
+async def generate_signature(
+    request: Request,
+    event: WebhookEvent,
+):
     body = await request.body()
     signature = _sign(body)
 
