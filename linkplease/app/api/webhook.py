@@ -42,8 +42,7 @@ async def webhook(
     db: Session = Depends(get_db),
 ):
     print(f"DEBUG - Headers: {dict(request.headers)}")
-    print(f"DEBUG - Body Length: {len(body)}")
-    print(f"DEBUG - Full Body: {body!r}")
+    
     if not signature:
         raise HTTPException(
             status_code=401,
@@ -52,6 +51,8 @@ async def webhook(
     print(f"DEBUG - API Key being used: {settings.pseudogram_api_key[:5]}...")
     # Get the raw request body for HMAC verification
     body = await request.body()
+    print(f"DEBUG - Body Length: {len(body)}")
+    print(f"DEBUG - Full Body: {body!r}")
     print(f"DEBUG - API Key being used: {settings.pseudogram_api_key[:5]}...")
     expected_header = _sign(body)
     print(f"DEBUG - Received Header Signature: {signature}")
