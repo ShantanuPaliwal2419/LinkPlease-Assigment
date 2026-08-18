@@ -36,7 +36,7 @@ def get_stats():
         )
 
         duplicates_blocked = (
-         db.scalar(select(func.count()).select_from(BlockedDuplicate))
+         db.scalar(select(func.count()).select_from(BlockedDuplicateEvent))
          + db.scalar(select(func.count()).select_from(BlockedDuplicateEvent))
 )
 
