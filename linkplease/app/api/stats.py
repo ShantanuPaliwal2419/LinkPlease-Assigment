@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from sqlalchemy import func, select
 
 from app.db import SessionLocal
-from app.models.blocked_duplicate import BlockedDuplicate
+from app.models.blocked_duplicate import BlockedDuplicateEvent
 from app.models.dm_job import DMJob
 
 router = APIRouter()
@@ -35,10 +35,10 @@ def get_stats():
             )
         )
 
-        duplicates_blocked = db.scalar(
-            select(func.count())
-            .select_from(BlockedDuplicate)
-        )
+        duplicates_blocked = (
+         db.scalar(select(func.count()).select_from(BlockedDuplicate))
+         + db.scalar(select(func.count()).select_from(BlockedDuplicateEvent))
+)
 
         return {
             "sent": sent or 0,

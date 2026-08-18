@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
-from app.models.blocked_duplicate import BlockedDuplicate
+from app.models.blocked_duplicate import BlockedDuplicateEvent
 from app.models.comment import Comment
 from app.models.dm_job import DMJob
 from app.models.event import Event
@@ -28,6 +28,12 @@ def process_webhook(event, db: Session) -> str:
     result = db.execute(event_insert)
 
     if result.rowcount == 0:
+      db.execute(insert(BlockedDuplicateEvent).values(
+        event_id=event.event_id,
+        comment_id=event.data.comment_id,
+    ))
+      db.commit()
+      print(f"Duplicate event blocked: event_id={event.event_id}")
       return "duplicate"
 
 

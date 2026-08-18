@@ -3,12 +3,11 @@ from datetime import datetime
 from sqlalchemy import BigInteger, DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
-
 from app.db import Base
 
 
-class BlockedDuplicate(Base):
-    __tablename__ = "blocked_duplicates"
+class BlockedDuplicateEvent(Base):
+    __tablename__ = "blocked_duplicate_events"
 
     id: Mapped[int] = mapped_column(
         BigInteger,
@@ -16,12 +15,7 @@ class BlockedDuplicate(Base):
         autoincrement=True,
     )
 
-    user_id: Mapped[str] = mapped_column(
-        String,
-        nullable=False,
-    )
-
-    rule_id: Mapped[str] = mapped_column(
+    event_id: Mapped[str] = mapped_column(
         String,
         nullable=False,
     )
