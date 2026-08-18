@@ -7,7 +7,7 @@ from app.db import Base
 
 
 class BlockedDuplicateEvent(Base):
-    __tablename__ = "blocked_duplicate_events"
+    __tablename__ = "blocked_duplicates"
 
     id: Mapped[int] = mapped_column(
         BigInteger,
@@ -15,7 +15,12 @@ class BlockedDuplicateEvent(Base):
         autoincrement=True,
     )
 
-    event_id: Mapped[str] = mapped_column(
+    user_id: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+    )
+
+    rule_id: Mapped[str] = mapped_column(
         String,
         nullable=False,
     )

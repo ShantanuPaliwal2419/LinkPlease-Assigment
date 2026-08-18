@@ -1,12 +1,12 @@
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
+
 from app.models.blocked_duplicate import BlockedDuplicateEvent
 from app.models.comment import Comment
 from app.models.dm_job import DMJob
 from app.models.event import Event
 from app.models.rule import Rule
-
 
 
 def process_webhook(event, db: Session) -> str:
@@ -28,15 +28,14 @@ def process_webhook(event, db: Session) -> str:
     result = db.execute(event_insert)
 
     if result.rowcount == 0:
-      db.execute(insert(BlockedDuplicateEvent).values(
-        event_id=event.event_id,
-        comment_id=event.data.comment_id,
-    ))
-      db.commit()
-      print(f"Duplicate event blocked: event_id={event.event_id}")
-      return "duplicate"
+        db.commit()
 
+        print(
+            f"Duplicate webhook blocked: "
+            f"event_id={event.event_id}"
+        )
 
+        return "duplicate"
 
     comment_id = event.data.comment_id
 
@@ -59,7 +58,6 @@ def process_webhook(event, db: Session) -> str:
         )
 
         db.execute(delete_insert)
-
         db.commit()
 
         print(
@@ -83,11 +81,7 @@ def process_webhook(event, db: Session) -> str:
         return "ignored"
 
     # ---------------------------------------------------------
-    # 4. Create comment if it doesn't exist.
-    #
-    # IMPORTANT:
-    # If comment.deleted arrived first, the row already exists
-    # with state='deleted', so this INSERT does nothing.
+    # 4. Create comment if it doesn't exist
     # ---------------------------------------------------------
 
     comment_insert = insert(Comment).values(
@@ -105,7 +99,7 @@ def process_webhook(event, db: Session) -> str:
     db.execute(comment_insert)
 
     # ---------------------------------------------------------
-    # 5. Read the actual state from DB
+    # 5. Read actual comment state
     # ---------------------------------------------------------
 
     comment = db.scalar(
@@ -146,7 +140,7 @@ def process_webhook(event, db: Session) -> str:
             continue
 
         # -----------------------------------------------------
-        # 8. Create DM job.
+        # 8. Create DM job
         #
         # UNIQUE(user_id, rule_id) prevents duplicate DMs.
         # -----------------------------------------------------
@@ -168,22 +162,28 @@ def process_webhook(event, db: Session) -> str:
 
         job_result = db.execute(job_insert)
 
+        # -----------------------------------------------------
+        # 9. Record duplicate DM attempt
+        # -----------------------------------------------------
+
         if job_result.rowcount == 0:
 
-         duplicate_insert = insert(BlockedDuplicate).values(
-        user_id=user.user_id,
-        rule_id=rule.id,
-        comment_id=comment_id,
-    )
+            db.execute(
+                insert(BlockedDuplicateEvent).values(
+                    user_id=user.user_id,
+                    rule_id=rule.id,
+                    comment_id=comment_id,
+                )
+            )
 
-         db.execute(duplicate_insert)
+            print(
+                f"Duplicate DM blocked: "
+                f"user={user.user_id}, "
+                f"rule={rule.id}"
+            )
 
-         print(
-        f"Duplicate blocked: "
-        f"user={user.user_id}, rule={rule.id}"
-    )
     # ---------------------------------------------------------
-    # 9. Commit everything atomically
+    # 10. Commit everything atomically
     # ---------------------------------------------------------
 
     db.commit()
