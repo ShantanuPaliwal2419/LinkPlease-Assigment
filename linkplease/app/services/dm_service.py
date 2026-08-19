@@ -1,14 +1,16 @@
+from typing import Optional
 import httpx
 
 from app.config import settings
 
 
-def send_dm(
+async def send_dm_async(
     recipient_user_id: str,
     message: str,
     comment_id: str,
     idempotency_key: str,
-):
+    client: Optional[httpx.AsyncClient] = None,
+) -> httpx.Response:
     url = f"{settings.pseudogram_base_url}/v1/dm/send"
 
     headers = {
@@ -22,12 +24,21 @@ def send_dm(
         "comment_id": comment_id,
     }
 
-    response = httpx.post(
-        url,
-        json=payload,
-        headers=headers,
-        timeout=10,
-    )
+    if client is not None:
+        response = await client.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=10,
+        )
+    else:
+        async with httpx.AsyncClient() as async_client:
+            response = await async_client.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=10,
+            )
 
     print("PseudoGram status:", response.status_code)
     print("PseudoGram body:", response.text)
@@ -35,20 +46,36 @@ def send_dm(
     return response
 
 
-def get_dm_status(dm_id: str):
+async def get_dm_status_async(
+    dm_id: str,
+    client: Optional[httpx.AsyncClient] = None,
+) -> httpx.Response:
     url = f"{settings.pseudogram_base_url}/v1/dm/{dm_id}"
 
     headers = {
         "X-API-Key": settings.pseudogram_api_key,
     }
 
-    response = httpx.get(
-        url,
-        headers=headers,
-        timeout=10,
-    )
+    if client is not None:
+        response = await client.get(
+            url,
+            headers=headers,
+            timeout=10,
+        )
+    else:
+        async with httpx.AsyncClient() as async_client:
+            response = await async_client.get(
+                url,
+                headers=headers,
+                timeout=10,
+            )
 
     print("Reconciliation status:", response.status_code)
     print("Reconciliation body:", response.text)
 
     return response
+
+
+# Aliases for backward compatibility
+send_dm = send_dm_async
+get_dm_status = get_dm_status_async
