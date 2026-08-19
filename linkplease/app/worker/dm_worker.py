@@ -30,8 +30,13 @@ print("🔥🔥🔥 DM WORKER PROCESS STARTED 🔥🔥🔥", flush=True)
 # ============================================================
 
 MAX_ATTEMPTS = 5
+
 RECONCILE_POLL_SECONDS = 10
 FIRST_RECONCILE_DELAY_SECONDS = 3
+
+# Idle worker backoff
+IDLE_BACKOFF_INITIAL = 1
+IDLE_BACKOFF_MAX = 10
 
 
 # ============================================================
@@ -47,7 +52,10 @@ async def fetch_and_lock_next_job(
         - timedelta(minutes=2)
     )
 
-    print("🔍 Checking for queued/stuck DM jobs...", flush=True)
+    print(
+        "🔍 Checking for queued/stuck DM jobs...",
+        flush=True,
+    )
 
     stmt = (
         select(DMJob)
@@ -107,7 +115,10 @@ async def get_waiting_job(
     db: AsyncSession,
 ) -> DMJob | None:
 
-    print("🔍 Checking for waiting reconciliation jobs...", flush=True)
+    print(
+        "🔍 Checking for waiting reconciliation jobs...",
+        flush=True,
+    )
 
     stmt = (
         select(DMJob)
@@ -126,6 +137,7 @@ async def get_waiting_job(
     job = result.scalar_one_or_none()
 
     if job:
+
         print(
             f"🔄 RECONCILE JOB PICKED | "
             f"id={job.id} | "
@@ -447,8 +459,6 @@ async def process_job(
 
         await db.commit()
 
-        await asyncio.sleep(retry_seconds)
-
         return
 
     # ========================================================
@@ -509,9 +519,9 @@ async def reconcile_job(
     try:
 
         response = await get_dm_status_async(
-    job.dm_id,
-    client,
-)
+            job.dm_id,
+            client,
+        )
 
     except Exception:
 
@@ -575,6 +585,7 @@ async def reconcile_job(
         return
 
     try:
+
         data = response.json()
 
     except ValueError:
@@ -782,6 +793,12 @@ async def run_worker():
         asyncio.get_running_loop().time()
     )
 
+    # --------------------------------------------------------
+    # IDLE BACKOFF STATE
+    # --------------------------------------------------------
+
+    idle_backoff = IDLE_BACKOFF_INITIAL
+
     async with httpx.AsyncClient(
         timeout=10.0
     ) as client:
@@ -841,6 +858,13 @@ async def run_worker():
                                 client,
                             )
                         ):
+
+                            # Job found and processed.
+                            # Reset idle backoff.
+                            idle_backoff = (
+                                IDLE_BACKOFF_INITIAL
+                            )
+
                             continue
 
                     else:
@@ -861,6 +885,13 @@ async def run_worker():
                                 client,
                             )
                         ):
+
+                            # Job found and processed.
+                            # Reset idle backoff.
+                            idle_backoff = (
+                                IDLE_BACKOFF_INITIAL
+                            )
+
                             continue
 
                 except Exception as e:
@@ -875,16 +906,26 @@ async def run_worker():
                     )
 
             # =================================================
-            # IDLE
+            # IDLE BACKOFF
             # =================================================
 
             print(
-                "😴 WORKER IDLE | "
-                "no eligible jobs, sleeping 1s",
+                f"😴 WORKER IDLE | "
+                f"no eligible jobs, "
+                f"sleeping {idle_backoff}s",
                 flush=True,
             )
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(idle_backoff)
+
+            # Exponential backoff:
+            #
+            # 1s → 2s → 4s → 8s → 10s → 10s...
+            #
+            idle_backoff = min(
+                idle_backoff * 2,
+                IDLE_BACKOFF_MAX,
+            )
 
 
 # ============================================================
