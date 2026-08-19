@@ -1,6 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.blocked_duplicate import BlockedDuplicateEvent
 from app.models.comment import Comment
@@ -9,7 +9,7 @@ from app.models.event import Event
 from app.models.rule import Rule
 
 
-def process_webhook(event, db: Session) -> str:
+async def process_webhook(event, db: AsyncSession) -> str:
 
     # ---------------------------------------------------------
     # 1. Deduplicate webhook event
@@ -25,10 +25,10 @@ def process_webhook(event, db: Session) -> str:
         index_elements=[Event.event_id]
     )
 
-    result = db.execute(event_insert)
+    result = await db.execute(event_insert)
 
     if result.rowcount == 0:
-        db.commit()
+        await db.commit()
 
         print(
             f"Duplicate webhook blocked: "
@@ -57,8 +57,8 @@ def process_webhook(event, db: Session) -> str:
             },
         )
 
-        db.execute(delete_insert)
-        db.commit()
+        await db.execute(delete_insert)
+        await db.commit()
 
         print(
             f"Comment {comment_id} marked as deleted."
@@ -71,13 +71,13 @@ def process_webhook(event, db: Session) -> str:
     # ---------------------------------------------------------
 
     if event.event_type != "comment.created":
-        db.commit()
+        await db.commit()
         return "ignored"
 
     user = event.data.from_
 
     if user is None or event.data.text is None:
-        db.commit()
+        await db.commit()
         return "ignored"
 
     # ---------------------------------------------------------
@@ -96,13 +96,13 @@ def process_webhook(event, db: Session) -> str:
         index_elements=[Comment.comment_id]
     )
 
-    db.execute(comment_insert)
+    await db.execute(comment_insert)
 
     # ---------------------------------------------------------
     # 5. Read actual comment state
     # ---------------------------------------------------------
 
-    comment = db.scalar(
+    comment = await db.scalar(
         select(Comment).where(
             Comment.comment_id == comment_id
         )
@@ -113,11 +113,11 @@ def process_webhook(event, db: Session) -> str:
     # ---------------------------------------------------------
 
     if comment is None:
-        db.commit()
+        await db.commit()
         return "ignored"
 
     if comment.state == "deleted":
-        db.commit()
+        await db.commit()
 
         print(
             f"Comment {comment_id} was already deleted. "
@@ -130,7 +130,8 @@ def process_webhook(event, db: Session) -> str:
     # 7. Find matching rules
     # ---------------------------------------------------------
 
-    rules = db.scalars(select(Rule)).all()
+    rules_result = await db.scalars(select(Rule))
+    rules = rules_result.all()
 
     comment_text = event.data.text.lower()
 
@@ -160,7 +161,7 @@ def process_webhook(event, db: Session) -> str:
             ]
         )
 
-        job_result = db.execute(job_insert)
+        job_result = await db.execute(job_insert)
 
         # -----------------------------------------------------
         # 9. Record duplicate DM attempt
@@ -168,7 +169,7 @@ def process_webhook(event, db: Session) -> str:
 
         if job_result.rowcount == 0:
 
-            db.execute(
+            await db.execute(
                 insert(BlockedDuplicateEvent).values(
                     user_id=user.user_id,
                     rule_id=rule.id,
@@ -186,6 +187,6 @@ def process_webhook(event, db: Session) -> str:
     # 10. Commit everything atomically
     # ---------------------------------------------------------
 
-    db.commit()
+    await db.commit()
 
     return "processed"

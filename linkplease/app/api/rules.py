@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, status
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models.rule import Rule
@@ -16,9 +16,9 @@ router = APIRouter(prefix="/rules", tags=["rules"])
     response_model=RuleResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_rule(
+async def create_rule(
     request: CreateRuleRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     rule_id = str(uuid.uuid4())
 
@@ -29,8 +29,8 @@ def create_rule(
     )
 
     db.add(rule)
-    db.commit()
-    db.refresh(rule)
+    await db.commit()
+    await db.refresh(rule)
 
     return RuleResponse(
         rule_id=rule.id,

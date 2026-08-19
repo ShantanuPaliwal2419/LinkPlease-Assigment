@@ -1,24 +1,29 @@
 import hashlib
 import hmac
 import os
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request
-from sqlalchemy.orm import Session
+import time
 from typing import Annotated
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_db
 from app.schemas import WebhookEvent
 from app.services.webhook_service import process_webhook
-import time
+
 PROCESS_START = time.time()
 
 router = APIRouter(tags=["webhook"])
+
+
 @router.get("/debug/key-check")
 def key_check():
     return {
         "key_full": settings.pseudogram_api_key,
         "process_started_at": PROCESS_START,
     }
+
 
 def _sign(body: bytes) -> str:
     """Shared signing logic so the real endpoint and the test-signer
@@ -29,7 +34,10 @@ def _sign(body: bytes) -> str:
         hashlib.sha256,
     ).hexdigest()
     return f"sha256={digest}"
+
+
 SKIP_SIG_CHECK = os.getenv("SKIP_SIG_CHECK", "false").lower() == "true"
+
 
 @router.post("/webhook")
 async def webhook(
@@ -39,7 +47,7 @@ async def webhook(
         str | None,
         Header(alias="X-PseudoGram-Signature")
     ] = None,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     if not signature and not SKIP_SIG_CHECK:
         raise HTTPException(
@@ -58,12 +66,14 @@ async def webhook(
             )
 
     # Pydantic has already validated the JSON
-    result = process_webhook(event, db)
+    result = await process_webhook(event, db)
 
     return {
         "status": "ok",
         "result": result,
     }
+
+
 @router.post("/webhook/sign")
 async def generate_signature(
     request: Request,
