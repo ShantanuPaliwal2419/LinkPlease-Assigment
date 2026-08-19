@@ -509,9 +509,9 @@ async def reconcile_job(
     try:
 
         response = await get_dm_status_async(
-            client,
-            job.dm_id,
-        )
+    job.dm_id,
+    client,
+)
 
     except Exception:
 
