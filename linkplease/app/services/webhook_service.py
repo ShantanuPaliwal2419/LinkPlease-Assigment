@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,46 +15,62 @@ from app.models.rule import Rule
 # KEYWORD MATCHING
 # ============================================================
 
-def keyword_matches(comment_text: str, keyword: str) -> bool:
+def keyword_matches(keyword: str, text: str) -> bool:
     """
-    Match a rule keyword against a comment.
+    Match keywords intelligently.
 
     Examples:
-        PRICE + "price please"   -> True
-        PRICE + "pricing please" -> True
-        PRICE + "prices?"        -> True
-        PRICE + "amazing content"-> False
+        PRICE   -> price
+        PRICE   -> pricing
+        PRICE   -> prices
+        PRICE   -> priced
+
+    Also supports normal substring matching for phrases.
     """
 
-    text = comment_text.strip().casefold()
-    keyword = keyword.strip().casefold()
-
-    if not text or not keyword:
+    if not keyword or not text:
         return False
 
-    # Direct substring match
+    keyword = keyword.strip().lower()
+    text = text.strip().lower()
+
+    # --------------------------------------------------------
+    # Direct match
+    # --------------------------------------------------------
+
     if keyword in text:
         return True
 
-    # Handle common word variations.
+    # --------------------------------------------------------
+    # Word-based matching
+    # --------------------------------------------------------
+
+    words = re.findall(r"[a-zA-Z0-9']+", text)
+
+    # Exact word
+    if keyword in words:
+        return True
+
+    # --------------------------------------------------------
+    # Handle words like:
     #
-    # Example:
-    #   price -> pricing
-    #   price -> prices
+    # price -> pricing
+    # price -> prices
+    # price -> priced
     #
-    # "price" -> stem "pric"
+    # "price" itself doesn't appear literally inside
+    # "pricing", so create a simple stem.
+    # --------------------------------------------------------
+
+    stem = keyword
+
     if keyword.endswith("e"):
         stem = keyword[:-1]
 
-        variations = [
-            f"{stem}ing",
-            f"{stem}ed",
-            f"{stem}s",
-        ]
+    for word in words:
 
-        for variation in variations:
-            if variation in text:
-                return True
+        if word.startswith(stem):
+            return True
 
     return False
 
@@ -61,11 +79,14 @@ def keyword_matches(comment_text: str, keyword: str) -> bool:
 # WEBHOOK PROCESSOR
 # ============================================================
 
-async def process_webhook(event, db: AsyncSession) -> str:
+async def process_webhook(
+    event,
+    db: AsyncSession,
+) -> str:
 
-    # ---------------------------------------------------------
-    # 1. Deduplicate webhook event
-    # ---------------------------------------------------------
+    # ========================================================
+    # 1. DEDUPLICATE WEBHOOK EVENT
+    # ========================================================
 
     event_insert = insert(Event).values(
         event_id=event.event_id,
@@ -79,21 +100,27 @@ async def process_webhook(event, db: AsyncSession) -> str:
 
     result = await db.execute(event_insert)
 
+    # Event already processed
     if result.rowcount == 0:
+
         await db.commit()
 
         print(
-            f"Duplicate webhook blocked: "
+            f"[DUPLICATE EVENT] "
             f"event_id={event.event_id}"
         )
 
         return "duplicate"
 
+    # ========================================================
+    # COMMENT ID
+    # ========================================================
+
     comment_id = event.data.comment_id
 
-    # ---------------------------------------------------------
-    # 2. Handle comment.deleted
-    # ---------------------------------------------------------
+    # ========================================================
+    # 2. HANDLE comment.deleted
+    # ========================================================
 
     if event.event_type == "comment.deleted":
 
@@ -110,37 +137,60 @@ async def process_webhook(event, db: AsyncSession) -> str:
         )
 
         await db.execute(delete_insert)
+
         await db.commit()
 
         print(
-            f"Comment {comment_id} marked as deleted."
+            f"[COMMENT DELETED] "
+            f"comment_id={comment_id}"
         )
 
         return "deleted"
 
-    # ---------------------------------------------------------
-    # 3. Ignore events other than comment.created
-    # ---------------------------------------------------------
+    # ========================================================
+    # 3. IGNORE OTHER EVENT TYPES
+    # ========================================================
 
     if event.event_type != "comment.created":
+
         await db.commit()
+
+        print(
+            f"[IGNORED EVENT] "
+            f"type={event.event_type}"
+        )
+
         return "ignored"
+
+    # ========================================================
+    # 4. VALIDATE USER + TEXT
+    # ========================================================
 
     user = event.data.from_
 
-    if user is None or event.data.text is None:
+    if user is None or not event.data.text:
+
         await db.commit()
+
+        print(
+            f"[IGNORED COMMENT] "
+            f"comment_id={comment_id}"
+        )
+
         return "ignored"
 
-    # ---------------------------------------------------------
-    # 4. Create comment if it doesn't exist
-    # ---------------------------------------------------------
+    user_id = user.user_id
+    comment_text = event.data.text.strip()
+
+    # ========================================================
+    # 5. CREATE COMMENT
+    # ========================================================
 
     comment_insert = insert(Comment).values(
         comment_id=comment_id,
-        user_id=user.user_id,
+        user_id=user_id,
         post_id=event.data.post_id,
-        text=event.data.text,
+        text=comment_text,
         state="active",
     )
 
@@ -150,37 +200,47 @@ async def process_webhook(event, db: AsyncSession) -> str:
 
     await db.execute(comment_insert)
 
-    # ---------------------------------------------------------
-    # 5. Read actual comment state
-    # ---------------------------------------------------------
+    # ========================================================
+    # 6. READ COMMENT STATE
+    #
+    # This protects against a comment that was already
+    # tombstoned/deleted before another event arrived.
+    # ========================================================
 
     comment = await db.scalar(
-        select(Comment).where(
-            Comment.comment_id == comment_id
-        )
+        select(Comment)
+        .where(Comment.comment_id == comment_id)
     )
 
-    # ---------------------------------------------------------
-    # 6. Tombstone check
-    # ---------------------------------------------------------
-
     if comment is None:
-        await db.commit()
-        return "ignored"
 
-    if comment.state == "deleted":
         await db.commit()
 
         print(
-            f"Comment {comment_id} was already deleted. "
-            f"Skipping DM."
+            f"[COMMENT NOT FOUND] "
+            f"comment_id={comment_id}"
+        )
+
+        return "ignored"
+
+    # ========================================================
+    # 7. TOMBSTONE CHECK
+    # ========================================================
+
+    if comment.state == "deleted":
+
+        await db.commit()
+
+        print(
+            f"[TOMBSTONE] "
+            f"comment_id={comment_id}"
         )
 
         return "deleted"
 
-    # ---------------------------------------------------------
-    # 7. Find matching rules
-    # ---------------------------------------------------------
+    # ========================================================
+    # 8. LOAD ALL RULES ONCE
+    # ========================================================
 
     rules_result = await db.scalars(
         select(Rule)
@@ -188,42 +248,58 @@ async def process_webhook(event, db: AsyncSession) -> str:
 
     rules = rules_result.all()
 
-    comment_text = event.data.text
+    # ========================================================
+    # 9. MATCH RULES
+    # ========================================================
 
-    matched_rule = False
+    matched_rules = []
 
     for rule in rules:
 
-        # -----------------------------------------------------
-        # Keyword matching
-        # -----------------------------------------------------
-
-        if not keyword_matches(
-            comment_text,
+        if keyword_matches(
             rule.keyword,
+            comment_text,
         ):
-            continue
+            matched_rules.append(rule)
 
-        matched_rule = True
+            print(
+                f"[RULE MATCH] "
+                f"user={user_id} "
+                f"comment={comment_id} "
+                f"keyword={rule.keyword} "
+                f"text={comment_text}"
+            )
+
+    # ========================================================
+    # NO RULE MATCH
+    # ========================================================
+
+    if not matched_rules:
+
+        await db.commit()
 
         print(
-            f"KEYWORD MATCH | "
-            f"user={user.user_id} | "
-            f"comment={comment_id} | "
-            f"text={comment_text!r} | "
-            f"keyword={rule.keyword!r}"
+            f"[NO MATCH] "
+            f"user={user_id} "
+            f"comment={comment_id} "
+            f"text={comment_text}"
         )
 
-        # -----------------------------------------------------
-        # 8. Create DM job
-        #
-        # UNIQUE(user_id, rule_id) prevents duplicate DMs.
-        # -----------------------------------------------------
+        return "no_match"
+
+    # ========================================================
+    # 10. CREATE DM JOBS
+    # ========================================================
+
+    jobs_created = 0
+    duplicates_blocked = 0
+
+    for rule in matched_rules:
 
         job_insert = insert(DMJob).values(
             rule_id=rule.id,
             comment_id=comment_id,
-            user_id=user.user_id,
+            user_id=user_id,
             message=rule.dm_message,
             status="queued",
         )
@@ -235,57 +311,65 @@ async def process_webhook(event, db: AsyncSession) -> str:
             ]
         )
 
-        job_result = await db.execute(
-            job_insert
-        )
+        job_result = await db.execute(job_insert)
 
-        # -----------------------------------------------------
-        # 9. Record duplicate DM attempt
-        # -----------------------------------------------------
+        # ====================================================
+        # NEW JOB
+        # ====================================================
 
-        if job_result.rowcount == 0:
+        if job_result.rowcount == 1:
 
-            await db.execute(
-                insert(BlockedDuplicateEvent).values(
-                    user_id=user.user_id,
-                    rule_id=rule.id,
-                    comment_id=comment_id,
-                )
-            )
+            jobs_created += 1
 
             print(
-                f"Duplicate DM blocked: "
-                f"user={user.user_id}, "
-                f"rule={rule.id}, "
-                f"comment={comment_id}"
+                f"[DM QUEUED] "
+                f"user={user_id} "
+                f"rule={rule.id}"
             )
+
+        # ====================================================
+        # DUPLICATE JOB
+        # ====================================================
 
         else:
 
-            print(
-                f"DM JOB CREATED | "
-                f"user={user.user_id} | "
-                f"rule={rule.id} | "
-                f"comment={comment_id}"
+            duplicates_blocked += 1
+
+            duplicate_insert = (
+                insert(BlockedDuplicateEvent)
+                .values(
+                    user_id=user_id,
+                    rule_id=rule.id,
+                    comment_id=comment_id,
+                )
+                .on_conflict_do_nothing()
             )
 
-    # ---------------------------------------------------------
-    # 10. No matching rule
-    # ---------------------------------------------------------
+            await db.execute(duplicate_insert)
 
-    if not matched_rule:
+            print(
+                f"[DM DUPLICATE BLOCKED] "
+                f"user={user_id} "
+                f"rule={rule.id}"
+            )
 
-        print(
-            f"NO KEYWORD MATCH | "
-            f"user={user.user_id} | "
-            f"comment={comment_id} | "
-            f"text={comment_text!r}"
-        )
-
-    # ---------------------------------------------------------
-    # 11. Commit everything atomically
-    # ---------------------------------------------------------
+    # ========================================================
+    # 11. COMMIT ATOMICALLY
+    # ========================================================
 
     await db.commit()
+
+    # ========================================================
+    # 12. FINAL LOG
+    # ========================================================
+
+    print(
+        f"[WEBHOOK PROCESSED] "
+        f"user={user_id} "
+        f"comment={comment_id} "
+        f"matched_rules={len(matched_rules)} "
+        f"jobs_created={jobs_created} "
+        f"duplicates_blocked={duplicates_blocked}"
+    )
 
     return "processed"
