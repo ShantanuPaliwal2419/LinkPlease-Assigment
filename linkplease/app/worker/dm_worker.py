@@ -37,16 +37,16 @@ print(
 
 MAX_ATTEMPTS = 5
 
-# Number of DMs sent concurrently.
+# Number of DMs that can be sent concurrently.
 SEND_CONCURRENCY = 5
 
 # Number of reconciliation requests concurrently.
 RECONCILE_CONCURRENCY = 10
 
-# How many jobs to claim from DB at once.
+# Number of new send jobs claimed at once.
 BATCH_SIZE = 5
 
-# How frequently queued DMs are checked.
+# How often waiting DMs are checked.
 RECONCILE_POLL_SECONDS = 3
 
 # First reconciliation after send.
@@ -56,11 +56,8 @@ FIRST_RECONCILE_DELAY_SECONDS = 2
 IDLE_SLEEP_MIN = 0.5
 IDLE_SLEEP_MAX = 3
 
-# Jobs stuck in "sending" longer than this are recovered.
+# Recover jobs stuck in "sending".
 STUCK_JOB_MINUTES = 2
-
-# HTTP timeout.
-HTTP_TIMEOUT = 15.0
 
 
 # ============================================================
@@ -80,34 +77,44 @@ async def fetch_and_lock_jobs(
     limit: int = BATCH_SIZE,
 ):
     """
-    Atomically claim a batch of queued/stuck jobs.
+    Atomically claim queued jobs.
 
-    Important:
-    We only increment attempts when a job is actually being
-    sent again.
+    Also recovers jobs that were stuck in "sending"
+    because the worker crashed/restarted.
+
+    IMPORTANT:
+    attempts are incremented ONLY when we actually
+    start a send attempt.
     """
 
     now = utcnow()
 
     stuck_cutoff = (
-        now
-        - timedelta(minutes=STUCK_JOB_MINUTES)
+        now - timedelta(minutes=STUCK_JOB_MINUTES)
     )
 
     stmt = (
         select(DMJob)
         .where(
             or_(
+                # ------------------------------------------------
+                # Normal queued jobs
+                # ------------------------------------------------
                 (
                     (DMJob.status == "queued")
                     & (DMJob.attempts < MAX_ATTEMPTS)
                 ),
+
+                # ------------------------------------------------
+                # Recover crashed/stuck send jobs
+                # ------------------------------------------------
                 (
                     (DMJob.status == "sending")
                     & (DMJob.updated_at <= stuck_cutoff)
                     & (DMJob.attempts < MAX_ATTEMPTS)
                 ),
             ),
+
             DMJob.next_attempt_at <= now,
         )
         .order_by(DMJob.id)
@@ -122,16 +129,15 @@ async def fetch_and_lock_jobs(
     if not jobs:
         return []
 
-    # --------------------------------------------------------
-    # Capture everything needed BEFORE commit.
-    # --------------------------------------------------------
-
     job_data = []
 
     for job in jobs:
 
         job.status = "sending"
+
+        # Increment ONLY when actually sending.
         job.attempts += 1
+
         job.updated_at = now
 
         job_data.append(
@@ -147,7 +153,8 @@ async def fetch_and_lock_jobs(
     await db.commit()
 
     print(
-        f"🔒 BATCH LOCKED | count={len(job_data)} | "
+        f"🔒 BATCH LOCKED | "
+        f"count={len(job_data)} | "
         f"jobs={[j['id'] for j in job_data]}",
         flush=True,
     )
@@ -161,10 +168,10 @@ async def fetch_and_lock_jobs(
 
 async def fetch_waiting_jobs(
     db: AsyncSession,
-    limit: int = BATCH_SIZE,
+    limit: int = RECONCILE_CONCURRENCY,
 ):
     """
-    Fetch DMs that need reconciliation.
+    Fetch DMs waiting for delivery reconciliation.
     """
 
     now = utcnow()
@@ -200,11 +207,12 @@ async def fetch_waiting_jobs(
             }
         )
 
-        # Temporarily move the job forward so another worker
-        # doesn't immediately pick it up.
+        # Prevent immediate re-selection.
         job.next_attempt_at = (
             now
-            + timedelta(seconds=RECONCILE_POLL_SECONDS)
+            + timedelta(
+                seconds=RECONCILE_POLL_SECONDS
+            )
         )
 
         job.updated_at = now
@@ -212,7 +220,8 @@ async def fetch_waiting_jobs(
     await db.commit()
 
     print(
-        f"🔄 WAITING BATCH FOUND | count={len(job_data)}",
+        f"🔄 WAITING BATCH FOUND | "
+        f"count={len(job_data)}",
         flush=True,
     )
 
@@ -229,15 +238,14 @@ async def update_job(
 ):
     """
     Every concurrent task gets its own DB session.
-
-    This is important:
-    AsyncSession should NOT be shared between concurrent
-    asyncio tasks.
     """
 
     async with AsyncSessionLocal() as db:
 
-        job = await db.get(DMJob, job_id)
+        job = await db.get(
+            DMJob,
+            job_id,
+        )
 
         if job is None:
             return
@@ -260,25 +268,29 @@ async def schedule_retry_or_fail(
     reason: str,
 ):
     """
-    Retry only when we genuinely need another send attempt.
+    Put the job back into queue if attempts remain.
 
-    Never allow attempts to exceed MAX_ATTEMPTS.
+    Otherwise permanently fail it.
     """
 
     async with AsyncSessionLocal() as db:
 
-        job = await db.get(DMJob, job_id)
+        job = await db.get(
+            DMJob,
+            job_id,
+        )
 
         if job is None:
             return
 
-        # ----------------------------------------------------
-        # HARD ATTEMPT LIMIT
-        # ----------------------------------------------------
+        # ========================================================
+        # MAX ATTEMPTS REACHED
+        # ========================================================
 
         if attempts >= MAX_ATTEMPTS:
 
             job.status = "failed"
+            job.next_attempt_at = None
             job.updated_at = utcnow()
 
             await db.commit()
@@ -293,9 +305,9 @@ async def schedule_retry_or_fail(
 
             return
 
-        # ----------------------------------------------------
-        # Exponential backoff
-        # ----------------------------------------------------
+        # ========================================================
+        # EXPONENTIAL BACKOFF
+        # ========================================================
 
         retry_seconds = min(
             2 ** attempts,
@@ -306,7 +318,9 @@ async def schedule_retry_or_fail(
 
         job.next_attempt_at = (
             utcnow()
-            + timedelta(seconds=retry_seconds)
+            + timedelta(
+                seconds=retry_seconds
+            )
         )
 
         job.updated_at = utcnow()
@@ -332,11 +346,6 @@ async def process_send_job(
     job: dict,
     semaphore: asyncio.Semaphore,
 ):
-    """
-    Process one DM.
-
-    Network calls happen concurrently.
-    """
 
     async with semaphore:
 
@@ -386,9 +395,9 @@ async def process_send_job(
             flush=True,
         )
 
-        # ====================================================
+        # ========================================================
         # SUCCESS / ACCEPTED
-        # ====================================================
+        # ========================================================
 
         if response.status_code in (200, 202):
 
@@ -416,9 +425,9 @@ async def process_send_job(
                 flush=True,
             )
 
-            # ------------------------------------------------
-            # API ACCEPTED AND QUEUED
-            # ------------------------------------------------
+            # ----------------------------------------------------
+            # QUEUED
+            # ----------------------------------------------------
 
             if dm_status == "queued":
 
@@ -453,50 +462,54 @@ async def process_send_job(
 
                 return
 
-            # ------------------------------------------------
+            # ----------------------------------------------------
             # IMMEDIATELY DELIVERED
-            # ------------------------------------------------
+            # ----------------------------------------------------
 
-            if dm_status in ("sent", "delivered"):
+            if dm_status in (
+                "sent",
+                "delivered",
+            ):
 
                 await update_job(
                     job_id,
                     dm_id=dm_id,
                     status="delivered",
+                    next_attempt_at=None,
                 )
 
                 print(
-                    f"✅ DM DELIVERED | job={job_id}",
+                    f"✅ DM DELIVERED | "
+                    f"job={job_id}",
                     flush=True,
                 )
 
                 return
 
-            # ------------------------------------------------
-            # API IMMEDIATELY FAILED
-            # ------------------------------------------------
+            # ----------------------------------------------------
+            # API FAILED
+            # ----------------------------------------------------
 
             if dm_status == "failed":
 
-                # Important:
-                # Don't blindly retry if API has already
-                # created a DM and explicitly reports failure.
                 await update_job(
                     job_id,
                     dm_id=dm_id,
                     status="failed",
+                    next_attempt_at=None,
                 )
 
                 print(
-                    f"❌ DM API FAILED | job={job_id}",
+                    f"❌ DM API FAILED | "
+                    f"job={job_id}",
                     flush=True,
                 )
 
                 return
 
-            # ------------------------------------------------
-            # UNKNOWN STATUS
-            # ------------------------------------------------
+            # ----------------------------------------------------
+            # UNKNOWN API STATUS
+            # ----------------------------------------------------
 
             await schedule_retry_or_fail(
                 job_id,
@@ -506,27 +519,29 @@ async def process_send_job(
 
             return
 
-        # ====================================================
+        # ========================================================
         # BAD REQUEST
-        # ====================================================
+        # ========================================================
 
         if response.status_code == 400:
 
             await update_job(
                 job_id,
                 status="failed",
+                next_attempt_at=None,
             )
 
             print(
-                f"❌ HTTP 400 | job={job_id}",
+                f"❌ HTTP 400 | "
+                f"job={job_id}",
                 flush=True,
             )
 
             return
 
-        # ====================================================
+        # ========================================================
         # RATE LIMIT
-        # ====================================================
+        # ========================================================
 
         if response.status_code == 429:
 
@@ -535,47 +550,65 @@ async def process_send_job(
             )
 
             try:
-                retry_seconds = int(
-                    retry_after
-                ) if retry_after else 10
 
-            except ValueError:
-                retry_seconds = 10
-
-            async with AsyncSessionLocal() as db:
-
-                db_job = await db.get(
-                    DMJob,
-                    job_id,
+                retry_seconds = (
+                    int(retry_after)
+                    if retry_after
+                    else 10
                 )
 
-                if db_job:
+            except ValueError:
 
-                    db_job.status = "queued"
+                retry_seconds = 10
 
-                    db_job.next_attempt_at = (
-                        utcnow()
-                        + timedelta(
-                            seconds=retry_seconds
-                        )
+            # ----------------------------------------------------
+            # IMPORTANT FIX
+            #
+            # Never requeue if MAX_ATTEMPTS has already
+            # been reached.
+            # ----------------------------------------------------
+
+            if attempts >= MAX_ATTEMPTS:
+
+                await update_job(
+                    job_id,
+                    status="failed",
+                    next_attempt_at=None,
+                )
+
+                print(
+                    f"❌ RATE LIMIT + MAX ATTEMPTS | "
+                    f"job={job_id} | "
+                    f"attempts={attempts}",
+                    flush=True,
+                )
+
+                return
+
+            await update_job(
+                job_id,
+                status="queued",
+                next_attempt_at=(
+                    utcnow()
+                    + timedelta(
+                        seconds=retry_seconds
                     )
-
-                    db_job.updated_at = utcnow()
-
-                    await db.commit()
+                ),
+            )
 
             print(
                 f"🚦 RATE LIMITED | "
                 f"job={job_id} | "
+                f"attempt={attempts} | "
                 f"retry={retry_seconds}s",
                 flush=True,
             )
 
             return
 
-        # ====================================================
+        # ========================================================
         # SERVER ERROR
-        # ====================================================
+        # ========================================================
 
         if response.status_code >= 500:
 
@@ -587,13 +620,14 @@ async def process_send_job(
 
             return
 
-        # ====================================================
+        # ========================================================
         # UNKNOWN HTTP STATUS
-        # ====================================================
+        # ========================================================
 
         await update_job(
             job_id,
             status="failed",
+            next_attempt_at=None,
         )
 
         print(
@@ -618,7 +652,6 @@ async def reconcile_one(
 
         job_id = job["id"]
         dm_id = job["dm_id"]
-        attempts = job["attempts"]
 
         print(
             f"🔎 RECONCILING | "
@@ -660,15 +693,19 @@ async def reconcile_one(
             flush=True,
         )
 
-        # ====================================================
+        # ========================================================
         # PERMANENT API ERROR
-        # ====================================================
+        # ========================================================
 
-        if response.status_code in (400, 404):
+        if response.status_code in (
+            400,
+            404,
+        ):
 
             await update_job(
                 job_id,
                 status="failed",
+                next_attempt_at=None,
             )
 
             print(
@@ -679,9 +716,9 @@ async def reconcile_one(
 
             return
 
-        # ====================================================
+        # ========================================================
         # TEMPORARY ERROR
-        # ====================================================
+        # ========================================================
 
         if response.status_code != 200:
 
@@ -697,9 +734,9 @@ async def reconcile_one(
 
             return
 
-        # ====================================================
+        # ========================================================
         # PARSE
-        # ====================================================
+        # ========================================================
 
         try:
 
@@ -728,62 +765,60 @@ async def reconcile_one(
             flush=True,
         )
 
-        # ====================================================
+        # ========================================================
         # DELIVERED
-        # ====================================================
+        # ========================================================
 
         if status == "delivered":
 
             await update_job(
                 job_id,
                 status="delivered",
+                next_attempt_at=None,
             )
 
             print(
-                f"✅ DELIVERED | job={job_id}",
+                f"✅ DELIVERED | "
+                f"job={job_id}",
                 flush=True,
             )
 
             return
 
-        # ====================================================
+        # ========================================================
         # SENT
-        # ====================================================
+        # ========================================================
 
         if status == "sent":
 
             await update_job(
                 job_id,
                 status="delivered",
+                next_attempt_at=None,
             )
 
             print(
-                f"✅ SENT | job={job_id}",
+                f"✅ SENT | "
+                f"job={job_id}",
                 flush=True,
             )
 
             return
 
-        # ====================================================
+        # ========================================================
         # FAILED
-        # ====================================================
+        # ========================================================
 
         if status == "failed":
 
-            # IMPORTANT:
-            #
-            # The send request already succeeded and produced
-            # a dm_id.
-            #
-            # This is a delivery failure, NOT a new send
-            # attempt.
-            #
-            # Therefore don't increment attempts and don't
-            # resend the same DM automatically.
+            # DM already exists.
+            # DO NOT increment send attempts.
+            # DO NOT resend automatically.
 
             await update_job(
                 job_id,
                 status="failed",
+                next_attempt_at=None,
             )
 
             print(
@@ -795,9 +830,9 @@ async def reconcile_one(
 
             return
 
-        # ====================================================
+        # ========================================================
         # STILL QUEUED
-        # ====================================================
+        # ========================================================
 
         await update_job(
             job_id,
@@ -849,10 +884,22 @@ async def process_send_batch(
         for job in jobs
     ]
 
-    await asyncio.gather(
+    results = await asyncio.gather(
         *tasks,
         return_exceptions=True,
     )
+
+    # Log unexpected task-level exceptions.
+    for job, result in zip(jobs, results):
+
+        if isinstance(result, Exception):
+
+            logger.error(
+                "SEND TASK EXCEPTION | "
+                "job=%s | error=%r",
+                job["id"],
+                result,
+            )
 
     print(
         f"🏁 SEND BATCH FINISHED | "
@@ -892,10 +939,21 @@ async def process_reconcile_batch(
         for job in jobs
     ]
 
-    await asyncio.gather(
+    results = await asyncio.gather(
         *tasks,
         return_exceptions=True,
     )
+
+    for job, result in zip(jobs, results):
+
+        if isinstance(result, Exception):
+
+            logger.error(
+                "RECONCILE TASK EXCEPTION | "
+                "job=%s | error=%r",
+                job["id"],
+                result,
+            )
 
     print(
         f"🏁 RECONCILIATION BATCH FINISHED | "
@@ -936,9 +994,9 @@ async def run_worker():
         flush=True,
     )
 
-    # --------------------------------------------------------
-    # Persistent HTTP client
-    # --------------------------------------------------------
+    # ========================================================
+    # PERSISTENT HTTP CLIENT
+    # ========================================================
 
     limits = httpx.Limits(
         max_connections=20,
@@ -993,7 +1051,7 @@ async def run_worker():
                 last_heartbeat = now
 
             # =================================================
-            # 1. RECONCILIATION FIRST
+            # 1. RECONCILIATION
             # =================================================
 
             try:
@@ -1023,7 +1081,7 @@ async def run_worker():
                 )
 
             # =================================================
-            # 2. NEW SEND JOBS
+            # 2. SEND NEW JOBS
             # =================================================
 
             try:
@@ -1053,14 +1111,13 @@ async def run_worker():
                 )
 
             # =================================================
-            # RESET BACKOFF WHEN WORK EXISTS
+            # RESET BACKOFF
             # =================================================
 
             if found_work:
 
                 idle_sleep = IDLE_SLEEP_MIN
 
-                # Immediately loop again.
                 continue
 
             # =================================================
