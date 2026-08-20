@@ -10,14 +10,131 @@ Honest list of the ways this system can still lose a DM, send a duplicate, or re
 
 The tombstone check only protects the window before a `dm_jobs` row is created: if `comment.deleted` arrives while a comment has no matching rule yet, or before `comment.created` at all, it's handled correctly. But if `comment.created` is processed first, a `dm_jobs` row is created, and *then* `comment.deleted` arrives before the worker has sent it, nothing re-checks the comment's state before sending. The DM goes out for a comment that's already deleted. I haven't added a check in `process_job()` (or a cancellation step in the delete handler) for this ordering.
 
-## 3. Worker doesn't proactively stay under PseudoGram's rate limit
+## 3. Blocked Duplicate Audit Loss
 
-The worker loop sends jobs back-to-back with no pacing — it only sleeps when the queue is empty. It backs off correctly on `429` using the `Retry-After` header, so nothing gets lost, but during a burst (the 500-event / 10s load test is exactly this case) it will hit `429` repeatedly on the way to settling into the 10-req/60s limit rather than staying under it the whole time. This satisfies "nothing lost" but not "rate limit never breached" from the Part C stretch goal.
+The database-level uniqueness constraint protects against duplicate DMs even if recording the duplicate attempt fails. However, if the `BlockedDuplicateEvent` audit record cannot be persisted due to a database failure, the duplicate DM is still blocked but the event is not reflected in `/stats`.
 
-## 4. `/stats` has a small blind spot during an in-flight send
+Therefore, `duplicates_blocked` represents the number of duplicate attempts successfully recorded, rather than necessarily the total number of duplicate attempts that occurred.
 
-`queued` in `/stats` counts rows with `status in (queued, waiting)`. A row that's currently `sending` — i.e. the HTTP call to PseudoGram is in flight — is counted in none of `sent`, `failed`, or `queued` for that instant. With one worker processing jobs one at a time this window is short (one HTTP round-trip), but if `/stats` is polled at exactly the wrong moment, the four numbers won't sum to the total row count in `dm_jobs`.
+A future improvement would be to make duplicate detection and audit recording transactional, or derive duplicate metrics directly from the database conflict events/appropriate durable audit mechanism.
+## 4. — Real PseudoGram Webhook Signatures Do Not Verify (Most important)
 
-## 5. `/webhook` does several sequential DB round-trips per event, all inline
+### Description
 
-Each webhook call does roughly five to six sequential statements against Postgres (insert event, upsert comment, re-select comment, select all rules, insert job, possibly insert a blocked-duplicate row) before returning `200`. None of it calls PseudoGram, so it's normally fast, but it's all synchronous inside the request — there's no background task or queue in front of it. Under the 500-events/10s load test this has held up in testing, but a slow or cold-started Postgres connection (e.g. a free-tier instance waking up) would push individual webhook calls toward the 5-second contract limit, since there's nothing backgrounding the DB work itself.
+The webhook signature verification implementation works correctly for locally generated
+signatures, but real webhook deliveries from the PseudoGram simulator consistently fail
+HMAC verification.
+
+The `/webhook` endpoint receives the complete request body and the signature header, but
+the HMAC-SHA256 calculated from the received raw bytes does not match the signature
+provided by PseudoGram.
+
+Example:
+
+Received signature:
+
+sha256=0a281a021efca81275b899d6e1394e01e7fd1923340523db9fe80f11ec5efff5
+
+Computed signature:
+
+sha256=242fd2ee65dbc3cc2e9d0b336f7ca4ac40f833a5fbaad1802be14cc6747c43ab
+
+### Investigation
+
+The following possible causes were independently checked:
+
+- API key was reconfirmed against the PseudoGram `/v1/keygen` endpoint.
+- HMAC-SHA256 implementation was tested using a local sign-and-verify round trip.
+- The `/webhook/sign` endpoint generated signatures that were successfully verified
+  by the `/webhook` verification logic.
+- The webhook uses the exact raw request body rather than a re-serialized JSON object.
+- The received body length matched the HTTP `Content-Length` exactly.
+- No body truncation was observed.
+- No application-level compression/decompression issue was observed.
+- The application was running as a single stable process during testing.
+
+Example received request:
+
+Content-Length: 333
+
+Received body length: 333
+
+Therefore, the signature mismatch occurs even though the bytes used by the application
+for verification are the complete bytes received from the HTTP request.
+
+### Observed Result
+
+PseudoGram sends:
+
+HTTP 200-level webhook payload
++
+X-PseudoGram-Signature
+
+but the calculated HMAC does not match the provided signature.
+
+The application therefore correctly rejects the request with:
+
+HTTP 401 Unauthorized
+
+### Current Assessment
+
+Based on the tests performed, the most likely issue is an inconsistency in the
+PseudoGram simulator's signing process.
+
+For example, the simulator may be calculating the HMAC over a different byte
+representation of the payload than the representation actually transmitted over HTTP.
+
+Possible causes include:
+
+- signing a JSON representation before final serialization,
+- different JSON whitespace,
+- different key ordering,
+- modifying timestamp precision after signing,
+- or another serialization difference between the signed payload and transmitted body.
+
+This cannot be conclusively fixed from the application side because the application
+only has access to the signature and the final bytes received over HTTP.
+
+### Impact
+
+Real PseudoGram webhook events cannot currently pass signature verification and are
+therefore rejected before reaching the normal event-processing pipeline.
+
+This prevents the external simulator from exercising the complete webhook flow through
+the authenticated `/webhook` endpoint.
+
+The underlying rule matching, event deduplication, DM job creation, worker processing,
+retry handling, and reconciliation logic can still be tested independently using
+locally generated valid signatures.
+
+### Workaround / Testing Mode
+
+For development and grading against the simulator, signature verification can be
+explicitly disabled through the documented environment configuration:
+
+`SKIP_SIG_CHECK=true`
+
+This is not intended as a production security configuration.
+
+When disabled, the webhook can be used to validate the remaining event-processing
+pipeline despite the simulator's signature incompatibility.
+
+### Evidence
+
+The following was observed during a real simulator delivery:
+
+```text
+Body Length:
+333
+
+Content-Length:
+333
+
+Received Signature:
+sha256=0a281a021efca81275b899d6e1394e01e7fd1923340523db9fe80f11ec5efff5
+
+Computed Signature:
+sha256=242fd2ee65dbc3cc2e9d0b336f7ca4ac40f833a5fbaad1802be14cc6747c43ab
+
+HTTP Response:
+401 Unauthorized
