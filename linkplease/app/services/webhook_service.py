@@ -9,6 +9,58 @@ from app.models.event import Event
 from app.models.rule import Rule
 
 
+# ============================================================
+# KEYWORD MATCHING
+# ============================================================
+
+def keyword_matches(comment_text: str, keyword: str) -> bool:
+    """
+    Match a rule keyword against a comment.
+
+    Examples:
+        PRICE + "price please"   -> True
+        PRICE + "pricing please" -> True
+        PRICE + "prices?"        -> True
+        PRICE + "amazing content"-> False
+    """
+
+    text = comment_text.strip().casefold()
+    keyword = keyword.strip().casefold()
+
+    if not text or not keyword:
+        return False
+
+    # Direct substring match
+    if keyword in text:
+        return True
+
+    # Handle common word variations.
+    #
+    # Example:
+    #   price -> pricing
+    #   price -> prices
+    #
+    # "price" -> stem "pric"
+    if keyword.endswith("e"):
+        stem = keyword[:-1]
+
+        variations = [
+            f"{stem}ing",
+            f"{stem}ed",
+            f"{stem}s",
+        ]
+
+        for variation in variations:
+            if variation in text:
+                return True
+
+    return False
+
+
+# ============================================================
+# WEBHOOK PROCESSOR
+# ============================================================
+
 async def process_webhook(event, db: AsyncSession) -> str:
 
     # ---------------------------------------------------------
@@ -130,15 +182,37 @@ async def process_webhook(event, db: AsyncSession) -> str:
     # 7. Find matching rules
     # ---------------------------------------------------------
 
-    rules_result = await db.scalars(select(Rule))
+    rules_result = await db.scalars(
+        select(Rule)
+    )
+
     rules = rules_result.all()
 
-    comment_text = event.data.text.lower()
+    comment_text = event.data.text
+
+    matched_rule = False
 
     for rule in rules:
 
-        if rule.keyword.lower() not in comment_text:
+        # -----------------------------------------------------
+        # Keyword matching
+        # -----------------------------------------------------
+
+        if not keyword_matches(
+            comment_text,
+            rule.keyword,
+        ):
             continue
+
+        matched_rule = True
+
+        print(
+            f"KEYWORD MATCH | "
+            f"user={user.user_id} | "
+            f"comment={comment_id} | "
+            f"text={comment_text!r} | "
+            f"keyword={rule.keyword!r}"
+        )
 
         # -----------------------------------------------------
         # 8. Create DM job
@@ -161,7 +235,9 @@ async def process_webhook(event, db: AsyncSession) -> str:
             ]
         )
 
-        job_result = await db.execute(job_insert)
+        job_result = await db.execute(
+            job_insert
+        )
 
         # -----------------------------------------------------
         # 9. Record duplicate DM attempt
@@ -180,11 +256,34 @@ async def process_webhook(event, db: AsyncSession) -> str:
             print(
                 f"Duplicate DM blocked: "
                 f"user={user.user_id}, "
-                f"rule={rule.id}"
+                f"rule={rule.id}, "
+                f"comment={comment_id}"
+            )
+
+        else:
+
+            print(
+                f"DM JOB CREATED | "
+                f"user={user.user_id} | "
+                f"rule={rule.id} | "
+                f"comment={comment_id}"
             )
 
     # ---------------------------------------------------------
-    # 10. Commit everything atomically
+    # 10. No matching rule
+    # ---------------------------------------------------------
+
+    if not matched_rule:
+
+        print(
+            f"NO KEYWORD MATCH | "
+            f"user={user.user_id} | "
+            f"comment={comment_id} | "
+            f"text={comment_text!r}"
+        )
+
+    # ---------------------------------------------------------
+    # 11. Commit everything atomically
     # ---------------------------------------------------------
 
     await db.commit()
